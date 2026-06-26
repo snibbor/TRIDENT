@@ -987,8 +987,11 @@ class WSI:
             dataset=dataset,
             batch_size=batch_limit,
             num_workers=inferred_workers,
-            pin_memory=False,
+            pin_memory=True,            # pinned host buffers -> faster async H2D copy
         )
+        if inferred_workers and inferred_workers > 0:
+            # buffer more batches per worker so the GPU stays fed across I/O stalls
+            dataloader_kwargs['prefetch_factor'] = 4
 
         def _collect_features(ctx):
             dl_kwargs = dict(dataloader_kwargs)
@@ -998,7 +1001,7 @@ class WSI:
             iterator = tqdm(dataloader) if verbose else dataloader
             collected = []
             for imgs, _ in iterator:
-                imgs = imgs.to(device)
+                imgs = imgs.to(device, non_blocking=True)
                 with torch.autocast(
                     device_type=device.split(":")[0],
                     dtype=precision,

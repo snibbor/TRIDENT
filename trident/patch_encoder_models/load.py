@@ -113,6 +113,29 @@ class BasePatchEncoder(torch.nn.Module):
         self.enc_name: Optional[str] = None
         self.weights_path: Optional[str] = weights_path
         self.model, self.eval_transforms, self.precision = self._build(**build_kwargs)
+        self._apply_inference_accel()
+
+    def _apply_inference_accel(self) -> None:
+        """Inference-only accelerations (do NOT change outputs):
+          - enable timm fused attention (SDPA / FlashAttention) for ViT encoders
+          - torch.compile the model (kernel fusion). dynamic=True so the variable
+            last-batch size per slide does not trigger a recompile each time.
+        Both are guarded; on any failure the eager model is kept. Disable
+        compilation with the env var TRIDENT_COMPILE=0.
+        """
+        if getattr(self, "model", None) is None:
+            return
+        try:
+            from timm.layers import set_fused_attn
+            set_fused_attn(True)
+        except Exception:
+            pass
+        if os.environ.get("TRIDENT_COMPILE", "1") == "1":
+            try:
+                self.model = torch.compile(self.model, dynamic=True)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"[trident] torch.compile unavailable, using eager model: {e}")
 
     def ensure_valid_weights_path(self, weights_path: str) -> None:
         if not weights_path:
