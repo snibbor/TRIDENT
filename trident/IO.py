@@ -5,6 +5,7 @@ import socket
 import os
 import time
 import json
+import tempfile
 from typing import List, Optional, Union, Tuple
 import h5py
 import numpy as np
@@ -486,6 +487,40 @@ def save_h5(save_path, assets, attributes = None, mode = 'w'):
     >>> # Saves datasets and attributes to "output.h5".
     """
 
+    # Atomic write: serialize to a temp file in the SAME directory, then os.replace()
+    # it into place. os.replace() is atomic on a single filesystem, so a crash or
+    # power loss can never leave a half-written .h5 at `save_path` — readers and
+    # TRIDENT's file-existence resume logic see either the previous file or the
+    # complete new one, never a truncated one. Overhead is a single rename (a
+    # metadata op), so throughput is unaffected.
+    # NOTE: append mode ('a') must modify the existing file in place; no current
+    # TRIDENT caller uses it, but it is handled for safety.
+    if mode == 'a':
+        _save_h5_inplace(save_path, assets, attributes, mode)
+        return
+
+    save_dir = os.path.dirname(os.path.abspath(save_path)) or '.'
+    os.makedirs(save_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(save_path) + '.', suffix='.tmp', dir=save_dir)
+    os.close(fd)
+    try:
+        _save_h5_inplace(tmp_path, assets, attributes, 'w')
+        os.replace(tmp_path, save_path)
+    except BaseException:
+        # Best-effort cleanup; on hard power loss this may not run, but the orphan
+        # `*.tmp` has a non-.h5/.pt extension so resume never mistakes it for output.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _save_h5_inplace(save_path, assets, attributes=None, mode='w'):
+    """Write `assets` (and optional `attributes`) to an HDF5 file at `save_path`,
+    in place. Internal helper for `save_h5`, which wraps it with an atomic
+    temp-file + os.replace() so callers never observe a partial file."""
     with h5py.File(save_path, mode) as file:
         for key, val in assets.items():
             data_shape = val.shape
